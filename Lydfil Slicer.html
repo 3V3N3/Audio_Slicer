@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+  <meta charset="UTF-8">
+  <title>Lydklipper med flere kutt, segmentvalg og filnavnvalg</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: #f5f5f5;
+    }
+    .container {
+      padding: 20px;
+    }
+    h1 {
+      text-align: center;
+    }
+    input[type="file"] {
+      display: block;
+      margin: 0 auto 10px auto;
+    }
+    /* Canvas fyller nettleservinduets bredde (tar hensyn til containerens padding) */
+    canvas {
+      width: 100%;
+      height: 200px;
+      border: 1px solid #ccc;
+      background: #fff;
+      display: block;
+    }
+    .controls {
+      margin-top: 10px;
+      text-align: center;
+    }
+    .controls .mode,
+    .controls .playback,
+    .controls .save,
+    .controls .clear {
+      margin-bottom: 10px;
+    }
+    .controls label {
+      margin: 0 10px;
+    }
+    button {
+      padding: 8px 16px;
+      margin: 5px;
+      font-size: 1em;
+      cursor: pointer;
+    }
+    /* Stiler for filnavn-input */
+    .filename-input {
+      padding: 6px;
+      font-size: 1em;
+      width: 200px;
+      margin-right: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Lydklipper med flere kutt</h1>
+    <input type="file" id="audioFile" accept="audio/wav, audio/mpeg">
+    <canvas id="waveform"></canvas>
+    <div class="controls">
+      <!-- Velg modus: Legg til kutt eller Velg segment -->
+      <div class="mode">
+        <label>
+          <input type="radio" name="mode" value="cut" checked> Legg til kutt
+        </label>
+        <label>
+          <input type="radio" name="mode" value="select"> Velg segment
+        </label>
+      </div>
+      <div class="playback">
+        <button id="playButton">Play</button>
+        <button id="stopButton">Stopp</button>
+      </div>
+      <div class="save">
+        <input type="text" id="fileName" class="filename-input" placeholder="Filnavn (f.eks. mittklipp)">
+        <button id="saveButton">Lagre Lydklipp Som</button>
+      </div>
+      <div class="clear">
+        <button id="clearCutsButton">Fjern kutt</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Globale variabler
+    let audioBuffer = null;
+    let fileBuffer = null;
+    let cutMarkers = []; // Array med kutt (i sekunder)
+    let selectedSegment = null; // Objekt {start, end}
+    let playSource = null;
+    let isPlaying = false;
+    let startTime = 0;      // Tidspunkt for når avspilling startet
+    let animationFrameRequest = null;
+
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const fileInput = document.getElementById('audioFile');
+    const canvas = document.getElementById('waveform');
+    const ctx = canvas.getContext('2d');
+    const playButton = document.getElementById('playButton');
+    const stopButton = document.getElementById('stopButton');
+    const saveButton = document.getElementById('saveButton');
+    const fileNameInput = document.getElementById('fileName');
+    const modeRadios = document.getElementsByName('mode');
+    const clearCutsButton = document.getElementById('clearCutsButton');
+
+    // Justerer canvas til å fylle bredden til nettleservinduet
+    function resizeCanvas() {
+      // Tar hensyn til containerens padding (20px på hver side)
+      canvas.width = window.innerWidth - 40;
+      canvas.height = 200;
+      drawWaveform();
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // Laster opp og dekoder lydfilen
+    fileInput.addEventListener('change', function(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function(event) {
+        fileBuffer = event.target.result;
+        audioCtx.decodeAudioData(fileBuffer, function(buffer) {
+          audioBuffer = buffer;
+          // Nullstill kutt og segmentvalg
+          cutMarkers = [];
+          selectedSegment = { start: 0, end: audioBuffer.duration };
+          drawWaveform();
+        });
+      };
+      reader.readAsArrayBuffer(file);
+    });
+
+    // Returnerer en sortert array med segmenter basert på cutMarkers
+    function getSegments() {
+      let segments = [];
+      if (!audioBuffer) return segments;
+      // Start- og sluttgrenser
+      const boundaries = [0, ...cutMarkers.sort((a, b) => a - b), audioBuffer.duration];
+      for (let i = 0; i < boundaries.length - 1; i++) {
+        segments.push({ start: boundaries[i], end: boundaries[i+1] });
+      }
+      return segments;
+    }
+
+    // Tegner bølgeformen, kuttmarkører, valgt segment og (valgfritt) playhead
+    // currentPlaySec (i sekunder) er gjeldende avspillingsposisjon
+    function drawWaveform(currentPlaySec = null) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (!audioBuffer) return;
+      const data = audioBuffer.getChannelData(0);
+      const step = Math.ceil(data.length / canvas.width);
+      const amp = canvas.height / 2;
+      ctx.fillStyle = '#007bff';
+      for (let i = 0; i < canvas.width; i++) {
+        let min = 1.0;
+        let max = -1.0;
+        const startIndex = i * step;
+        for (let j = 0; j < step && (startIndex + j) < data.length; j++) {
+          const datum = data[startIndex + j];
+          if (datum < min) min = datum;
+          if (datum > max) max = datum;
+        }
+        const yMin = (1 + min) * amp;
+        const yMax = (1 + max) * amp;
+        ctx.fillRect(i, yMin, 1, yMax - yMin);
+      }
+      // Tegn kuttmarkører
+      ctx.strokeStyle = 'red';
+      cutMarkers.forEach(marker => {
+        const x = (marker / audioBuffer.duration) * canvas.width;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+        ctx.stroke();
+      });
+      // Marker valgt segment (gjennomsiktig gul)
+      if (selectedSegment) {
+        const xStart = (selectedSegment.start / audioBuffer.duration) * canvas.width;
+        const xEnd = (selectedSegment.end / audioBuffer.duration) * canvas.width;
+        ctx.fillStyle = 'rgba(255, 215, 0, 0.3)';
+        ctx.fillRect(xStart, 0, xEnd - xStart, canvas.height);
+      }
+      // Tegn playhead (grønn linje)
+      if (currentPlaySec !== null) {
+        const playX = (currentPlaySec / audioBuffer.duration) * canvas.width;
+        ctx.strokeStyle = 'green';
+        ctx.beginPath();
+        ctx.moveTo(playX, 0);
+        ctx.lineTo(playX, canvas.height);
+        ctx.stroke();
+      }
+    }
+
+    // Håndterer klikk på canvas basert på valgt modus
+    canvas.addEventListener('click', function(e) {
+      if (!audioBuffer) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const time = (x / canvas.width) * audioBuffer.duration;
+      
+      // Sjekk hvilken modus som er valgt
+      let mode = 'cut';
+      for (const radio of modeRadios) {
+        if (radio.checked) {
+          mode = radio.value;
+          break;
+        }
+      }
+      
+      if (mode === 'cut') {
+        // Legg til kutt dersom det ikke er altfor nærme et eksisterende kutt
+        const tolerance = 0.05; // 50 ms toleranse
+        if (!cutMarkers.some(marker => Math.abs(marker - time) < tolerance)) {
+          cutMarkers.push(time);
+        }
+        // Ved nytt kutt settes valgt segment til hele filen (brukeren kan så velge et segment)
+        selectedSegment = { start: 0, end: audioBuffer.duration };
+      } else if (mode === 'select') {
+        // Finn hvilket segment klikket ligger i
+        const segments = getSegments();
+        for (const seg of segments) {
+          if (time >= seg.start && time <= seg.end) {
+            selectedSegment = seg;
+            break;
+          }
+        }
+      }
+      drawWaveform();
+    });
+
+    // Avspilling: Starter fra starten av det valgte segmentet
+    function playAudio() {
+      if (!audioBuffer) return;
+      if (isPlaying) return; // Unngå dobbel avspilling
+
+      const segStart = selectedSegment ? selectedSegment.start : 0;
+      const segEnd = selectedSegment ? selectedSegment.end : audioBuffer.duration;
+      if (segStart >= segEnd) return;
+
+      playSource = audioCtx.createBufferSource();
+      playSource.buffer = audioBuffer;
+      playSource.connect(audioCtx.destination);
+
+      const duration = segEnd - segStart;
+      startTime = audioCtx.currentTime;
+      isPlaying = true;
+
+      playSource.start(0, segStart, duration);
+      playSource.onended = function() {
+        isPlaying = false;
+        drawWaveform();
+        cancelAnimationFrame(animationFrameRequest);
+      };
+      updatePlayhead();
+    }
+
+    // Stopp: Stopper avspillingen og nullstiller
+    function stopAudio() {
+      if (isPlaying) {
+        if (playSource) playSource.stop();
+        isPlaying = false;
+        cancelAnimationFrame(animationFrameRequest);
+        const segStart = selectedSegment ? selectedSegment.start : 0;
+        drawWaveform(segStart);
+      }
+    }
+
+    // Oppdaterer playhead (grønn linje) under avspilling
+    function updatePlayhead() {
+      if (!isPlaying) return;
+      const segStart = selectedSegment ? selectedSegment.start : 0;
+      const currentPlaySec = segStart + (audioCtx.currentTime - startTime);
+      const segEnd = selectedSegment ? selectedSegment.end : audioBuffer.duration;
+      if (currentPlaySec >= segEnd) {
+        stopAudio();
+        return;
+      }
+      drawWaveform(currentPlaySec);
+      animationFrameRequest = requestAnimationFrame(updatePlayhead);
+    }
+
+    playButton.addEventListener('click', playAudio);
+    stopButton.addEventListener('click', stopAudio);
+
+    // Funksjon for å konvertere en del av AudioBuffer til WAV-format
+    function audioBufferToWav(buffer, startSec, endSec) {
+      const numChannels = buffer.numberOfChannels;
+      const sampleRate = buffer.sampleRate;
+      const startSample = Math.floor(startSec * sampleRate);
+      const endSample = Math.floor(endSec * sampleRate);
+      const numSamples = endSample - startSample;
+      const bytesPerSample = 2;
+      const blockAlign = numChannels * bytesPerSample;
+      const wavBuffer = new ArrayBuffer(44 + numSamples * blockAlign);
+      const view = new DataView(wavBuffer);
+
+      // RIFF-header
+      writeString(view, 0, 'RIFF');
+      view.setUint32(4, 36 + numSamples * blockAlign, true);
+      writeString(view, 8, 'WAVE');
+      writeString(view, 12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);  // PCM
+      view.setUint16(22, numChannels, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * blockAlign, true);
+      view.setUint16(32, blockAlign, true);
+      view.setUint16(34, 16, true);
+      writeString(view, 36, 'data');
+      view.setUint32(40, numSamples * blockAlign, true);
+
+      let offset = 44;
+      for (let i = startSample; i < endSample; i++) {
+        for (let channel = 0; channel < numChannels; channel++) {
+          let sample = buffer.getChannelData(channel)[i];
+          sample = Math.max(-1, Math.min(1, sample));
+          view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+          offset += 2;
+        }
+      }
+      return wavBuffer;
+    }
+
+    // Hjelpefunksjon for å skrive tekst i DataView
+    function writeString(view, offset, string) {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+      }
+    }
+
+    // Lagrer valgt segment som WAV-fil med ønsket filnavn
+    saveButton.addEventListener('click', function() {
+      if (!audioBuffer || !selectedSegment) {
+        alert('Last opp en lydfil og velg et segment.');
+        return;
+      }
+      let name = fileNameInput.value.trim();
+      if (!name) {
+        name = "lydklipp";
+      }
+      // Sørg for at filnavnet ender med .wav
+      if (!name.toLowerCase().endsWith('.wav')) {
+        name += ".wav";
+      }
+      const wavBuffer = audioBufferToWav(audioBuffer, selectedSegment.start, selectedSegment.end);
+      const blob = new Blob([new DataView(wavBuffer)], { type: 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.style.display = 'none';
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+    });
+
+    // Knapp for å fjerne alle kutt og starte på nytt
+    clearCutsButton.addEventListener('click', function() {
+      if (!audioBuffer) return;
+      cutMarkers = [];
+      selectedSegment = { start: 0, end: audioBuffer.duration };
+      drawWaveform();
+    });
+  </script>
+</body>
+</html>
